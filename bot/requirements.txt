@@ -1,0 +1,6 @@
+# HTTP client (used by both transcribe_audio.py and get_response.py)
+requests
+
+# openai-whisper is only needed when WHISPER_ENDPOINT is unset (local fallback).
+# When using the containerised whisper service, this package can be omitted.
+openai-whisper

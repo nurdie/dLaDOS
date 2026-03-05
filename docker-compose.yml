@@ -1,0 +1,118 @@
+# GLaDOS Discord Bot — Docker Compose stack
+#
+# Services:
+#   ollama       — local LLM inference (OpenAI-compatible API)
+#   voice        — GLaDOS TTS engine (dnhkng/GlaDOS, cloned at build time)
+#   whisper      — faster-whisper transcription service
+#   bot          — Node.js Discord bot
+#
+# Usage:
+#   cp .env.example .env   # fill in DISCORD_TOKEN
+#   docker compose up --build
+#
+# ARM64 hosts (Apple Silicon, Raspberry Pi):
+#   Images build natively. On x86-64 set:
+#     DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose up --build
+#
+# Pin the GLaDOS TTS version:
+#   docker compose build --build-arg GLADOS_REF=<tag-or-sha> voice
+
+services:
+
+  ollama:
+    container_name: ollama
+    build:
+      context: .
+      dockerfile: Dockerfile.ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b-instruct}
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q \"${OLLAMA_MODEL:-qwen2.5:3b-instruct}\""]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  # dnhkng/GlaDOS is cloned at build time (see Dockerfile.voice).
+  # Model weights are persisted in the voice_models volume — first startup
+  # downloads ~2-4 GB; subsequent startups are fast.
+  voice:
+    container_name: glados_voice
+    build:
+      context: .
+      dockerfile: Dockerfile.voice
+      args:
+        GLADOS_REF: ${GLADOS_REF:-main}
+    restart: unless-stopped
+    ports:
+      - "5050:5050"
+    environment:
+      - GLADOS_VOICE_HOST=0.0.0.0:5050
+    volumes:
+      - voice_models:/app/models
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "-o", "/dev/null",
+             "-X", "POST", "http://localhost:5050/v1/audio/speech",
+             "-H", "Content-Type: application/json",
+             "-d", "{\"input\":\"test\",\"voice\":\"glados\"}"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 120s
+
+  # faster-whisper runs as a persistent service so the model stays loaded
+  # between requests instead of reloading on every transcription.
+  whisper:
+    container_name: whisper
+    build:
+      context: .
+      dockerfile: Dockerfile.whisper
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  bot:
+    container_name: glados_bot
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_ENDPOINT=http://localhost:11434/v1/chat/completions
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b-instruct}
+      - TTS_ENDPOINT=http://localhost:5050/v1/audio/speech
+      - WHISPER_ENDPOINT=http://localhost:9000/v1/audio/transcriptions
+      - PYTHON=/opt/venv/bin/python3
+    depends_on:
+      ollama:
+        condition: service_healthy
+      voice:
+        condition: service_healthy
+      whisper:
+        condition: service_healthy
+
+volumes:
+  ollama_data:
+  voice_models:

@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 200" width="820">
+  <defs>
+    <radialGradient id="orange-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:#FF6600;stop-opacity:0.3"/>
+      <stop offset="100%" style="stop-color:#FF6600;stop-opacity:0"/>
+    </radialGradient>
+    <radialGradient id="blue-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:#4FC3F7;stop-opacity:0.3"/>
+      <stop offset="100%" style="stop-color:#4FC3F7;stop-opacity:0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="820" height="200" fill="#0d0d0d" rx="10"/>
+
+  <!-- Orange portal glow -->
+  <ellipse cx="90" cy="100" rx="70" ry="70" fill="url(#orange-glow)"/>
+  <!-- Orange portal rings -->
+  <ellipse cx="90" cy="100" rx="55" ry="55" fill="none" stroke="#FF6600" stroke-width="4" opacity="0.9"/>
+  <ellipse cx="90" cy="100" rx="40" ry="40" fill="none" stroke="#FF6600" stroke-width="2" opacity="0.5"/>
+  <!-- Aperture crosshair (orange) -->
+  <line x1="90" y1="55" x2="90" y2="75"  stroke="#FF6600" stroke-width="2" opacity="0.7"/>
+  <line x1="90" y1="125" x2="90" y2="145" stroke="#FF6600" stroke-width="2" opacity="0.7"/>
+  <line x1="45"  y1="100" x2="65"  y2="100" stroke="#FF6600" stroke-width="2" opacity="0.7"/>
+  <line x1="115" y1="100" x2="135" y2="100" stroke="#FF6600" stroke-width="2" opacity="0.7"/>
+  <circle cx="90" cy="100" r="7" fill="#FF6600" opacity="0.95"/>
+
+  <!-- Blue portal glow -->
+  <ellipse cx="730" cy="100" rx="70" ry="70" fill="url(#blue-glow)"/>
+  <!-- Blue portal rings -->
+  <ellipse cx="730" cy="100" rx="55" ry="55" fill="none" stroke="#4FC3F7" stroke-width="4" opacity="0.9"/>
+  <ellipse cx="730" cy="100" rx="40" ry="40" fill="none" stroke="#4FC3F7" stroke-width="2" opacity="0.5"/>
+  <!-- Aperture crosshair (blue) -->
+  <line x1="730" y1="55" x2="730" y2="75"  stroke="#4FC3F7" stroke-width="2" opacity="0.7"/>
+  <line x1="730" y1="125" x2="730" y2="145" stroke="#4FC3F7" stroke-width="2" opacity="0.7"/>
+  <line x1="685" y1="100" x2="705" y2="100" stroke="#4FC3F7" stroke-width="2" opacity="0.7"/>
+  <line x1="755" y1="100" x2="775" y2="100" stroke="#4FC3F7" stroke-width="2" opacity="0.7"/>
+  <circle cx="730" cy="100" r="7" fill="#4FC3F7" opacity="0.95"/>
+
+  <!-- Horizontal rule lines flanking text -->
+  <line x1="165" y1="100" x2="248" y2="100" stroke="#2a2a2a" stroke-width="1"/>
+  <line x1="572" y1="100" x2="655" y2="100" stroke="#2a2a2a" stroke-width="1"/>
+
+  <!-- GLaDOS title -->
+  <text x="410" y="88" font-family="'Courier New', Courier, monospace" font-size="62" font-weight="bold"
+        fill="#FF6600" text-anchor="middle" letter-spacing="6">GLaDOS</text>
+
+  <!-- Subtitle -->
+  <text x="410" y="130" font-family="'Courier New', Courier, monospace" font-size="15"
+        fill="#4FC3F7" text-anchor="middle" letter-spacing="10">DISCORD  BOT</text>
+
+  <!-- Bottom label -->
+  <text x="410" y="165" font-family="'Courier New', Courier, monospace" font-size="10"
+        fill="#3a3a3a" text-anchor="middle" letter-spacing="4">APERTURE SCIENCE ENRICHMENT CENTER</text>
+</svg>

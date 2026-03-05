@@ -1,0 +1,23 @@
+{
+  "name": "glados-discord-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GLaDOS Discord voice bot — local LLM + TTS + Whisper ASR",
+  "main": "src/bot.js",
+  "scripts": {
+    "start": "node src/bot.js"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@discordjs/opus": "^0.10.0",
+    "@discordjs/voice": "^0.19.0",
+    "@snazzah/davey": "^0.1.10",
+    "discord.js": "^14.21.0",
+    "dotenv": "^16.6.1",
+    "ffmpeg-static": "^5.2.0",
+    "libsodium-wrappers": "^0.7.16",
+    "prism-media": "^1.3.5"
+  }
+}

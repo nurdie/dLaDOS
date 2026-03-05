@@ -1,0 +1,33 @@
+FROM ubuntu:latest
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  ca-certificates git curl \
+  python3 python3-venv python3-pip \
+  build-essential ffmpeg libsm6 libxext6 libportaudio2 \
+  && rm -rf /var/lib/apt/lists/*
+
+# ── Clone GLaDOS TTS engine ───────────────────────────────────────────────────
+# Override GLADOS_REF at build time to pin a specific tag or commit:
+#   docker compose build --build-arg GLADOS_REF=v1.2.3 glados_voice
+ARG GLADOS_REPO=https://github.com/dnhkng/GlaDOS.git
+ARG GLADOS_REF=main
+RUN git clone --depth=1 --branch "${GLADOS_REF}" "${GLADOS_REPO}" /app
+
+WORKDIR /app
+
+# Create a venv so the system python3 is available to bootstrap scripts/install.py.
+# Note: scripts/install.py uses 'uv' to manage the project's own .venv at /app/.venv
+# and also downloads model weights.  Both happen at container startup (CMD), not here,
+# because separating them would require forking the upstream GLaDOS project.
+#
+# Consequence: first startup downloads Python packages AND model weights (~2-4 GB).
+# Subsequent startups are fast because:
+#   - model weights live in the glados_models Docker volume (survives rebuilds)
+#   - /app/.venv lives in the container layer (survives restarts, lost on full rebuild)
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:/root/.local/bin:$PATH"
+
+EXPOSE 5050
+
+CMD bash -lc "python scripts/install.py --api && ./scripts/serve"

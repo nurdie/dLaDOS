@@ -1,0 +1,16 @@
+FROM ubuntu:latest
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+  ca-certificates curl zstd \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://ollama.com/install.sh | bash
+
+COPY ollama-entrypoint.sh /usr/local/bin/ollama-entrypoint.sh
+RUN chmod +x /usr/local/bin/ollama-entrypoint.sh
+
+EXPOSE 11434
+VOLUME ["/root/.ollama"]
+
+CMD ["/usr/local/bin/ollama-entrypoint.sh"]

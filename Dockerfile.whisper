@@ -1,0 +1,30 @@
+FROM python:3.11-slim
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ffmpeg is required by faster-whisper for audio decoding
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  ffmpeg \
+  curl \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies
+# faster-whisper: ~4x faster than openai-whisper, lower memory, int8 CPU mode
+RUN pip install --no-cache-dir \
+  faster-whisper \
+  fastapi \
+  "uvicorn[standard]" \
+  python-multipart
+
+COPY whisper_service.py .
+
+EXPOSE 9000
+
+# WHISPER_MODEL is read at runtime; override in docker-compose or .env
+ENV WHISPER_MODEL=base
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+  CMD curl -f http://localhost:9000/health || exit 1
+
+CMD ["python", "whisper_service.py"]
