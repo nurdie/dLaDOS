@@ -2,17 +2,22 @@
 #
 # Services:
 #   ollama       — local LLM inference (OpenAI-compatible API)
+#   ollama-init  — one-shot model pull (runs after ollama is healthy)
 #   voice        — GLaDOS TTS engine (dnhkng/GlaDOS, cloned at build time)
 #   whisper      — faster-whisper transcription service
 #   bot          — Node.js Discord bot
 #
 # Usage:
 #   cp .env.example .env   # fill in DISCORD_TOKEN
-#   docker compose up --build
+#   ./run.sh up --build    # auto-detects GPU vendor (AMD/NVIDIA/CPU)
+#
+# Or run with an explicit override:
+#   docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build
+#   docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up --build
 #
 # ARM64 hosts (Apple Silicon, Raspberry Pi):
 #   Images build natively. On x86-64 set:
-#     DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose up --build
+#     DOCKER_DEFAULT_PLATFORM=linux/amd64 ./run.sh up --build
 #
 # Pin the GLaDOS TTS version:
 #   docker compose build --build-arg GLADOS_REF=<tag-or-sha> voice
@@ -21,25 +26,35 @@ services:
 
   ollama:
     container_name: ollama
-    build:
-      context: .
-      dockerfile: Dockerfile.ollama
+    image: ollama/ollama
     restart: unless-stopped
     ports:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-    env_file:
-      - .env
     environment:
-      - OLLAMA_HOST=0.0.0.0:11434
-      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:3b-instruct}
+      OLLAMA_HOST: 0.0.0.0:11434
     healthcheck:
-      test: ["CMD-SHELL", "ollama list | grep -q \"${OLLAMA_MODEL:-qwen2.5:3b-instruct}\""]
+      test: ["CMD", "ollama", "ps"]
       interval: 15s
       timeout: 10s
       retries: 20
       start_period: 30s
+
+  ollama-init:
+    container_name: ollama_init
+    image: curlimages/curl
+    restart: "no"
+    command:
+      - "-sf"
+      - "http://ollama:11434/api/pull"
+      - "-H"
+      - "Content-Type: application/json"
+      - "-d"
+      - "{\"name\":\"${OLLAMA_MODEL:-qwen2.5:3b-instruct}\"}"
+    depends_on:
+      ollama:
+        condition: service_healthy
 
   # dnhkng/GlaDOS is cloned at build time (see Dockerfile.voice).
   # Model weights are persisted in the voice_models volume — first startup
@@ -56,11 +71,9 @@ services:
       - "5050:5050"
     environment:
       - GLADOS_VOICE_HOST=0.0.0.0:5050
+      - LOG_LEVEL=WARNING
     volumes:
       - voice_models:/app/models
-    depends_on:
-      ollama:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-sf", "-o", "/dev/null",
              "-X", "POST", "http://localhost:5050/v1/audio/speech",
@@ -108,6 +121,8 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
       voice:
         condition: service_healthy
       whisper:

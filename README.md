@@ -89,8 +89,13 @@ The original approach spawned a Python subprocess per transcription, loading the
   - `Use Application Commands` (slash commands)
   - `Send Messages` (for ephemeral replies)
 - Sufficient RAM for the chosen models (see [Choosing Models](#choosing-models))
+- **GPU (optional but recommended):**
+  - AMD: ROCm-capable GPU with `/dev/kfd` exposed (auto-detected by `run.sh`)
+  - NVIDIA: `nvidia-container-toolkit` installed on the host (auto-detected by `run.sh`)
+  - Raspberry Pi: auto-detected — runs CPU with ARM64 images and memory limits tuned for Pi. Raspberry Pi 5 recommended for acceptable inference speed
+  - CPU-only fallback works on any x86-64 host but inference will be slow
 
-> **ARM64 (Apple Silicon / Raspberry Pi):** Docker builds natively. On x86-64, set `DOCKER_DEFAULT_PLATFORM=linux/amd64` before running `docker compose`.
+> **ARM64 (Apple Silicon / Raspberry Pi):** Docker builds natively. On x86-64, set `DOCKER_DEFAULT_PLATFORM=linux/amd64` before running `./run.sh`.
 
 ---
 
@@ -103,7 +108,7 @@ git clone https://github.com/nurdie/dLaDOS.git
 cd dLaDOS
 ```
 
-The GLaDOS TTS engine is cloned automatically at `docker compose build` — no submodules needed.
+The GLaDOS TTS engine is cloned automatically at build time — no submodules needed.
 
 ### 2. Configure
 
@@ -119,32 +124,26 @@ DISCORD_TOKEN=your-discord-bot-token-here
 
 See [Configuration](#%EF%B8%8F-configuration) for all options.
 
-### 3. Pull a model into Ollama
+### 3. Start
 
 ```bash
-docker compose run --rm ollama ollama pull qwen2.5:0.5b-instruct
+./run.sh up --build
 ```
 
-See [Choosing Models](#-choosing-models) for recommendations.
+`run.sh` detects your GPU vendor (AMD/NVIDIA/CPU) and passes the right Docker Compose overlay automatically. All services start together — the bot waits for the others to be healthy before connecting. On first run, the `voice` container downloads TTS model weights (~2–4 GB) into a Docker volume — this only happens once.
 
-### 4. Start
+> **Manual override:** `docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build`
 
-```bash
-docker compose up --build
-```
-
-All four services start. The bot waits for the others to be healthy before connecting. On first run, the `voice` container downloads TTS model weights (~2–4 GB) into a Docker volume — this only happens once.
-
-### 5. Summon GLaDOS
+### 4. Summon GLaDOS
 
 <div align="center">
 
 | Command | Description |
 |:---:|:---|
-| 🟠 `/glados` | Join your voice channel and start a conversation |
-| 🔵 `/glados say:<text>` | Speak text directly via TTS — no LLM, instant playback |
-| 🤖 `/glados text:<prompt>` | Send a typed prompt through the LLM and speak the response |
-| 🚪 `/leave` | Disconnect the bot |
+| 🟠 `/glados join` | Join your voice channel and start a conversation |
+| 🤖 `/glados ask <prompt>` | Send a typed prompt through the LLM and speak the response |
+| 🔵 `/glados say <text>` | Speak text directly via TTS — no LLM, instant playback |
+| 🚪 `/glados leave` | Disconnect the bot |
 
 </div>
 
@@ -183,7 +182,7 @@ Copy `.env.example` to `.env` and edit. Full reference in [`.env.example`](.env.
 | `qwen2.5:7b-instruct` | ~5 GB | Better quality; needs 8+ GB RAM |
 
 ```bash
-docker compose exec ollama ollama pull qwen2.5:3b-instruct
+docker exec ollama ollama pull qwen2.5:3b-instruct
 ```
 
 ### 🎧 Whisper (ASR)
@@ -197,7 +196,7 @@ docker compose exec ollama ollama pull qwen2.5:3b-instruct
 
 ```bash
 # Set WHISPER_MODEL=small in .env, then:
-docker compose up --build whisper
+./run.sh up --build whisper
 ```
 
 ---
@@ -219,7 +218,7 @@ You'll need a reachable Ollama instance and GLaDOS TTS service. Point `OLLAMA_EN
 ### Pinning the GLaDOS TTS version
 
 ```bash
-GLADOS_REF=v1.2.3 docker compose build voice
+GLADOS_REF=v1.2.3 ./run.sh build voice
 ```
 
 ### Logs

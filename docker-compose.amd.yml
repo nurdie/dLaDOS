@@ -1,0 +1,16 @@
+# AMD ROCm GPU overlay — used automatically by run.sh when an AMD GPU is detected.
+# Apply manually with:
+#   docker compose -f docker-compose.yml -f docker-compose.amd.yml up --build
+
+services:
+
+  ollama:
+    image: ollama/ollama:rocm
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+    security_opt:
+      - seccomp=unconfined
+

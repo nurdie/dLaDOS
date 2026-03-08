@@ -1,0 +1,16 @@
+# NVIDIA CUDA GPU overlay — used automatically by run.sh when an NVIDIA GPU is detected.
+# Requires nvidia-container-toolkit to be installed on the host.
+# Apply manually with:
+#   docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up --build
+
+services:
+
+  ollama:
+    image: ollama/ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

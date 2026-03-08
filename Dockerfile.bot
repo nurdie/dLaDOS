@@ -19,10 +19,10 @@ WORKDIR /app
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy package manifests first for layer caching
-COPY bot/package*.json ./
+# Copy package manifest first for layer caching
+COPY bot/package.json ./
 
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 
 COPY bot/ ./
 

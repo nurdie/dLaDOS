@@ -1,0 +1,48 @@
+# Raspberry Pi overlay — used automatically by run.sh when a Pi is detected.
+# Targets ARM64, constrains memory, and tunes Ollama for low-resource operation.
+# Apply manually with:
+#   docker compose -f docker-compose.yml -f docker-compose.rpi.yml up --build
+#
+# Recommended models for Pi (set OLLAMA_MODEL in .env):
+#   qwen2.5:0.5b-instruct  — fastest, fits in ~1 GB
+#   qwen2.5:1.5b-instruct  — better quality, fits in ~1.5 GB
+
+services:
+
+  ollama:
+    platform: linux/arm64
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "2"
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:0.5b-instruct}
+
+  ollama-init:
+    command:
+      - "-sf"
+      - "http://ollama:11434/api/pull"
+      - "-H"
+      - "Content-Type: application/json"
+      - "-d"
+      - "{\"name\":\"${OLLAMA_MODEL:-qwen2.5:0.5b-instruct}\"}"
+
+  voice:
+    platform: linux/arm64
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  whisper:
+    platform: linux/arm64
+    environment:
+      - WHISPER_MODEL=${WHISPER_MODEL:-tiny}
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  bot:
+    platform: linux/arm64
+    environment:
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:0.5b-instruct}

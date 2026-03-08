@@ -4,6 +4,7 @@ const { spawn } = require("node:child_process");
 const { appendFile, writeFile } = require("node:fs/promises");
 const prism = require("prism-media");
 const dotenv = require("dotenv");
+const pino = require("pino");
 const ffmpegPath = process.env.FFMPEG_PATH || "ffmpeg";
 const {
   AudioPlayerStatus,
@@ -25,6 +26,18 @@ const {
 
 dotenv.config();
 
+const log = pino({
+  level: process.env.LOG_LEVEL || "debug",
+  transport: {
+    target: "pino-pretty",
+    options: {
+      colorize: true,
+      translateTime: "SYS:HH:MM:ss.l",
+      ignore: "pid,hostname",
+    },
+  },
+});
+
 const token = process.env.DISCORD_TOKEN;
 const audioDir = path.resolve(process.cwd(), "audio");
 const logsDir = path.resolve(process.cwd(), "logs");
@@ -37,9 +50,6 @@ const venvPythonPath = path.resolve(process.cwd(), ".venv/bin/python");
 const ttsEndpoint = process.env.TTS_ENDPOINT || "http://glados_voice:5050/v1/audio/speech";
 const ttsVoice = process.env.TTS_VOICE || "glados";
 const maxConversationChars = Number(process.env.MAX_CONVERSATION_CHARS || 6000);
-const defaultSystemPrompt =
-  process.env.GLADOS_SYSTEM_PROMPT ||
-  "You are GLaDOS from Portal: dry, laconic, superior, sardonic, subtly menacing.";
 
 if (!token) {
   throw new Error("Missing DISCORD_TOKEN in .env");
@@ -87,12 +97,12 @@ async function logPrompt(source, prompt, mode, explicitUser = "") {
     `[${new Date().toISOString()}] ` +
     `[${mode}] [${guildName}] [${userTag}] ${prompt.replace(/\s+/g, " ").trim()}\n`;
 
-  console.log(`Prompt logged (${mode}): ${prompt}`);
+  log.info({ mode, guild: guildName, user: userTag }, `Prompt: ${prompt.replace(/\s+/g, " ").trim()}`);
 
   try {
     await appendFile(promptLogPath, entry, "utf8");
   } catch (error) {
-    console.error("Failed to write prompt log:", error);
+    log.error({ err: error }, "Failed to write prompt log");
   }
 }
 
@@ -100,23 +110,39 @@ function buildSlashCommands() {
   return [
     new SlashCommandBuilder()
       .setName("glados")
-      .setDescription("Start a voice session or speak a typed prompt.")
-      .addStringOption((option) =>
-        option
+      .setDescription("GLaDOS voice commands.")
+      .addSubcommand((sub) =>
+        sub
+          .setName("join")
+          .setDescription("Join your voice channel and start listening."),
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName("ask")
+          .setDescription("Send a text prompt through the LLM and speak the response.")
+          .addStringOption((option) =>
+            option
+              .setName("prompt")
+              .setDescription("Your prompt for GLaDOS")
+              .setRequired(true),
+          ),
+      )
+      .addSubcommand((sub) =>
+        sub
           .setName("say")
-          .setDescription("Speak this text directly via TTS, no LLM involved")
-          .setRequired(false),
+          .setDescription("Speak text directly via TTS, no LLM involved.")
+          .addStringOption((option) =>
+            option
+              .setName("text")
+              .setDescription("Text to speak")
+              .setRequired(true),
+          ),
       )
-      .addStringOption((option) =>
-        option
-          .setName("text")
-          .setDescription("Optional text prompt to speak immediately")
-          .setRequired(false),
+      .addSubcommand((sub) =>
+        sub
+          .setName("leave")
+          .setDescription("Disconnect GLaDOS from the current voice channel."),
       )
-      .toJSON(),
-    new SlashCommandBuilder()
-      .setName("leave")
-      .setDescription("Disconnect GLaDOS from the current voice channel.")
       .toJSON(),
   ];
 }
@@ -140,12 +166,7 @@ async function replyEphemeral(interaction, content) {
 }
 
 function createConversationHistory() {
-  return [
-    {
-      role: "system",
-      content: defaultSystemPrompt,
-    },
-  ];
+  return [];
 }
 
 function trimConversationHistory(history) {
@@ -213,8 +234,9 @@ async function connectToMemberChannel(message) {
     throw new Error("Join a voice channel before using this command.");
   }
 
+  const existing = getVoiceConnection(channel.guild.id);
   const connection =
-    getVoiceConnection(channel.guild.id) ||
+    existing ||
     joinVoiceChannel({
       adapterCreator: channel.guild.voiceAdapterCreator,
       channelId: channel.id,
@@ -222,8 +244,13 @@ async function connectToMemberChannel(message) {
       selfDeaf: false,
     });
 
+  if (!existing) {
+    log.debug({ guild: channel.guild.name, channel: channel.name }, "Joining voice channel");
+  }
+
   connection.subscribe(player);
   await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
+  log.debug({ guild: channel.guild.name, channel: channel.name }, "Voice connection ready");
 
   return connection;
 }
@@ -251,6 +278,7 @@ function cleanupListeningSession(guildId) {
 
   existingSession.active = false;
   listeningSessions.delete(guildId);
+  log.debug({ guildId }, "Listening session cleaned up");
 }
 
 async function startOpusListening(message) {
@@ -273,8 +301,9 @@ async function startOpusListening(message) {
     subscribedUserIds,
   });
 
-  console.log(
-    `Listening for Opus audio in ${channel.guild.name} / ${channel.name} (${subscribedUserIds.size} users)`,
+  log.info(
+    { guild: channel.guild.name, channel: channel.name, users: subscribedUserIds.size },
+    "Listening session started",
   );
 
   return connection;
@@ -314,15 +343,16 @@ function createMp3Resource(mp3Path) {
       ];
 
       if (expectedPreemptionErrors.some((pattern) => message.includes(pattern))) {
+        log.debug({ message }, "ffmpeg preemption (expected)");
         return;
       }
 
-      console.error(message);
+      log.error({ message }, "ffmpeg stderr");
     }
   });
 
   ffmpeg.on("error", (error) => {
-    console.error("ffmpeg process failed:", error);
+    log.error({ err: error }, "ffmpeg process failed");
   });
 
   return {
@@ -375,6 +405,8 @@ function captureFirstSpeaker(connection, channel, subscribedUserIds) {
       }
 
       const member = channel.members.get(userId);
+      log.debug({ userId, username: member?.user?.tag || userId }, "Speaking detected");
+
       input = connection.receiver.subscribe(userId, {
         end: {
           behavior: EndBehaviorType.AfterSilence,
@@ -484,7 +516,9 @@ function transcribeWithWhisper(audioPath) {
   }
 
   return new Promise((resolve, reject) => {
+    const t = Date.now();
     const python = getPythonExecutable();
+    log.debug({ audioPath: path.relative(process.cwd(), audioPath) }, "Whisper transcription started");
     const child = spawn(python, [whisperScriptPath, audioPath], {
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -510,6 +544,7 @@ function transcribeWithWhisper(audioPath) {
         return;
       }
 
+      log.debug({ durationMs: Date.now() - t }, "Whisper transcription complete");
       resolve(stdout.trim());
     });
   });
@@ -521,6 +556,7 @@ function generateResponseFromTranscript(transcript, typedPrompt = "") {
   }
 
   return new Promise((resolve, reject) => {
+    const t = Date.now();
     const python = getPythonExecutable();
     const args = [responseScriptPath, transcript];
 
@@ -528,6 +564,7 @@ function generateResponseFromTranscript(transcript, typedPrompt = "") {
       args.push(typedPrompt.trim());
     }
 
+    log.debug({ transcript: transcript.slice(0, 80) }, "LLM request started (transcript)");
     const child = spawn(python, args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -540,6 +577,9 @@ function generateResponseFromTranscript(transcript, typedPrompt = "") {
 
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
+      for (const line of chunk.toString().split("\n")) {
+        if (line.trim()) log.debug({ py: line.trim() }, "get_response");
+      }
     });
 
     child.once("error", (error) => {
@@ -553,6 +593,7 @@ function generateResponseFromTranscript(transcript, typedPrompt = "") {
         return;
       }
 
+      log.debug({ durationMs: Date.now() - t }, "LLM response received");
       resolve(stdout.trim());
     });
   });
@@ -564,7 +605,9 @@ function generateResponseFromMessages(messages) {
   }
 
   return new Promise((resolve, reject) => {
+    const t = Date.now();
     const python = getPythonExecutable();
+    log.debug({ messageCount: messages.length }, "LLM request started (messages)");
     const child = spawn(python, [responseScriptPath, JSON.stringify(messages)], {
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -577,6 +620,9 @@ function generateResponseFromMessages(messages) {
 
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString();
+      for (const line of chunk.toString().split("\n")) {
+        if (line.trim()) log.debug({ py: line.trim() }, "get_response");
+      }
     });
 
     child.once("error", (error) => {
@@ -590,6 +636,7 @@ function generateResponseFromMessages(messages) {
         return;
       }
 
+      log.debug({ durationMs: Date.now() - t }, "LLM response received");
       resolve(stdout.trim());
     });
   });
@@ -606,7 +653,7 @@ async function captureUntilTranscript(message, label, maxAttempts = 5) {
       return capture;
     }
 
-    console.log(`${label}: transcript was empty on attempt ${attempt}, listening again.`);
+    log.debug({ attempt, maxAttempts, label }, "Empty transcript, retrying");
   }
 
   throw new Error(
@@ -617,6 +664,9 @@ async function captureUntilTranscript(message, label, maxAttempts = 5) {
 }
 
 async function synthesizeSpeechToMp3(text, outputPath = ttsOutputPath) {
+  const t = Date.now();
+  log.debug({ chars: text.length, outputPath: path.relative(process.cwd(), outputPath) }, "TTS synthesis started");
+
   const response = await fetch(ttsEndpoint, {
     method: "POST",
     headers: {
@@ -635,6 +685,7 @@ async function synthesizeSpeechToMp3(text, outputPath = ttsOutputPath) {
 
   const audioBuffer = Buffer.from(await response.arrayBuffer());
   await writeFile(outputPath, audioBuffer);
+  log.debug({ durationMs: Date.now() - t, bytes: audioBuffer.length }, "TTS synthesis complete");
   return outputPath;
 }
 
@@ -645,6 +696,7 @@ function stopPlaybackForGuild(guildId) {
     return;
   }
 
+  log.debug({ guildId }, "Stopping current playback");
   playbackState.current = null;
   if (currentPlayback.transcoder && !currentPlayback.transcoder.killed) {
     currentPlayback.transcoder.kill("SIGTERM");
@@ -652,7 +704,7 @@ function stopPlaybackForGuild(guildId) {
 
   if (currentPlayback.mp3Path) {
     fs.unlink(currentPlayback.mp3Path, (err) => {
-      if (err) console.error(`Failed to delete TTS file ${currentPlayback.mp3Path}:`, err);
+      if (err) log.error({ err, mp3Path: currentPlayback.mp3Path }, "Failed to delete TTS file");
     });
   }
 
@@ -681,6 +733,7 @@ function playSpeechResponse(guildId, mp3Path, disconnectOnFinish = false) {
       transcoder,
     };
 
+    log.debug({ guildId, mp3Path: path.relative(process.cwd(), mp3Path) }, "Playback started");
     player.play(resource);
   });
 }
@@ -689,11 +742,11 @@ async function speakTextResponse(message, text) {
   await logPrompt(
     message,
     text,
-    "slash-text",
+    "slash-ask",
     message.user?.tag || message.user?.username || "",
   );
   const responseTextForTts = await generateResponseFromTranscript(text);
-  console.log(`!glados response: ${responseTextForTts || "[empty]"}`);
+  log.info({ response: responseTextForTts || "[empty]" }, "LLM response (ask)");
 
   if (!responseTextForTts) {
     return;
@@ -739,13 +792,16 @@ async function captureAndTranscribe(message, label) {
     result = await recordFirstSpeaker(message);
   }
 
-  console.log(`Recorded ${result.username} to ${path.relative(process.cwd(), result.outputPath)}`);
+  log.debug(
+    { username: result.username, file: path.relative(process.cwd(), result.outputPath) },
+    "Recording captured",
+  );
 
   const transcript = await transcribeWithWhisper(result.outputPath);
-  console.log(`${label} transcript (${result.username}): ${transcript || "[empty]"}`);
+  log.info({ label, username: result.username, transcript: transcript || "[empty]" }, "Transcript");
 
   fs.unlink(result.outputPath, (err) => {
-    if (err) console.error(`Failed to delete recording ${result.outputPath}:`, err);
+    if (err) log.error({ err, file: result.outputPath }, "Failed to delete recording");
   });
 
   return {
@@ -783,14 +839,14 @@ async function runVoiceConversationLoop(message) {
     let capture;
 
     try {
-      capture = await captureUntilTranscript(message, "!glados");
+      capture = await captureUntilTranscript(message, "voice");
     } catch (error) {
-      console.error("!glados listen cycle failed:", error);
+      log.error({ err: error }, "Listen cycle failed");
       continue;
     }
 
     if (shouldDisconnectOnTranscript(capture.transcript)) {
-      console.log("!glados shutdown phrase detected; disconnecting.");
+      log.info({ transcript: capture.transcript }, "Shutdown phrase detected, disconnecting");
       const connection = getVoiceConnection(channel.guild.id);
       cleanupListeningSession(channel.guild.id);
       if (connection) {
@@ -809,7 +865,7 @@ async function runVoiceConversationLoop(message) {
     void (async () => {
       try {
         const responseTextForTts = await generateResponseFromMessages(requestMessages);
-        console.log(`!glados response: ${responseTextForTts || "[empty]"}`);
+        log.info({ requestId, response: responseTextForTts || "[empty]" }, "LLM response (voice)");
 
         if (!responseTextForTts) {
           return;
@@ -823,6 +879,7 @@ async function runVoiceConversationLoop(message) {
         appendConversationMessage(activeSession, "assistant", responseTextForTts);
 
         if (requestId < activeSession.latestStartedPlaybackRequestId) {
+          log.debug({ requestId, latest: activeSession.latestStartedPlaybackRequestId }, "Skipping stale response");
           return;
         }
 
@@ -837,39 +894,37 @@ async function runVoiceConversationLoop(message) {
         }
 
         if (requestId < latestSession.latestStartedPlaybackRequestId) {
+          log.debug({ requestId, latest: latestSession.latestStartedPlaybackRequestId }, "Skipping stale playback");
           return;
         }
 
         latestSession.latestStartedPlaybackRequestId = requestId;
         await playSpeechResponse(channel.guild.id, speechPath, false);
       } catch (error) {
-        console.error("!glados response cycle failed:", error);
+        log.error({ err: error, requestId }, "Response cycle failed");
       }
     })();
   }
 }
 
 client.once("ready", async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+  log.info({ tag: client.user.tag }, "Bot ready");
   try {
     await registerSlashCommands();
-    console.log("Registered slash commands for connected guilds.");
+    log.info({ guilds: client.guilds.cache.size }, "Slash commands registered");
   } catch (error) {
-    console.error("Failed to register slash commands:", error);
+    log.error({ err: error }, "Failed to register slash commands");
   }
 
-  console.log("Slash commands:");
-  console.log("  /glados");
-  console.log("  /glados say:<text>");
-  console.log("  /glados text:<prompt>");
-  console.log("  /leave");
+  log.info("Commands: /glados join | /glados ask <prompt> | /glados say <text> | /glados leave");
 });
 
 client.on("guildCreate", async (guild) => {
+  log.info({ guild: guild.name, guildId: guild.id }, "Joined new guild, registering commands");
   try {
     await guild.commands.set(buildSlashCommands());
   } catch (error) {
-    console.error(`Failed to register slash commands for guild ${guild.id}:`, error);
+    log.error({ err: error, guildId: guild.id }, "Failed to register slash commands for guild");
   }
 });
 
@@ -879,75 +934,81 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (interaction.commandName === "glados") {
-    const sayText = (interaction.options.getString("say") || "").trim();
-    const typedPrompt = (interaction.options.getString("text") || "").trim();
+    const sub = interaction.options.getSubcommand();
+    const user = interaction.user?.tag || interaction.user?.username || "unknown";
+    const guild = interaction.guild?.name || interaction.guildId;
+    const channel = getInvokerVoiceChannel(interaction)?.name || "unknown";
+
+    log.info({ sub, user, guild, channel }, "/glados invoked");
 
     try {
-      if (sayText) {
+      if (sub === "say") {
+        const sayText = interaction.options.getString("text", true).trim();
+        log.debug({ chars: sayText.length }, "/glados say text received");
         await replyEphemeral(interaction, "Speaking in your voice channel.");
         void sayDirectText(interaction, sayText)
           .then(() => replyEphemeral(interaction, "Done."))
           .catch(async (error) => {
-            console.error("/glados say pipeline failed:", error);
+            log.error({ err: error }, "/glados say pipeline failed");
             await replyEphemeral(interaction, `Error: ${error.message}`);
           });
         return;
       }
 
-      if (typedPrompt) {
+      if (sub === "ask") {
+        const typedPrompt = interaction.options.getString("prompt", true).trim();
+        log.debug({ chars: typedPrompt.length }, "/glados ask prompt received");
         await replyEphemeral(interaction, "Generating a voice response.");
         void speakTextResponse(interaction, typedPrompt)
           .then(() => replyEphemeral(interaction, "Played the response in your voice channel."))
           .catch(async (error) => {
-            console.error("/glados text pipeline failed:", error);
+            log.error({ err: error }, "/glados ask pipeline failed");
             await replyEphemeral(interaction, `Error: ${error.message}`);
           });
         return;
       }
 
+      if (sub === "leave") {
+        const connection = getVoiceConnection(interaction.guildId);
+        if (!connection) {
+          await replyEphemeral(interaction, "GLaDOS is not connected.");
+          return;
+        }
+        cleanupListeningSession(interaction.guildId);
+        stopPlaybackForGuild(interaction.guildId);
+        connection.destroy();
+        log.info({ guild }, "Disconnected by user request");
+        await replyEphemeral(interaction, "Disconnected.");
+        return;
+      }
+
+      // sub === "join"
       await startOpusListening(interaction);
       await replyEphemeral(
         interaction,
-        "Listening in your voice channel. Say 'go away gladoss' to disconnect.",
+        "Listening in your voice channel. Say 'go away GLaDOS' to disconnect.",
       );
       void runVoiceConversationLoop(interaction).catch(async (error) => {
-        console.error("/glados pipeline failed:", error);
+        log.error({ err: error }, "/glados join pipeline failed");
         if (getListeningSession(interaction.guildId)) {
           await replyEphemeral(interaction, `Error: ${error.message}`);
         }
       });
     } catch (error) {
-      console.error("/glados failed:", error);
+      log.error({ err: error, sub }, "/glados command failed");
       await replyEphemeral(interaction, `Error: ${error.message}`);
     }
-
-    return;
-  }
-
-  if (interaction.commandName === "leave") {
-    const connection = getVoiceConnection(interaction.guildId);
-
-    if (!connection) {
-      await replyEphemeral(interaction, "GLaDOS is not connected.");
-      return;
-    }
-
-    cleanupListeningSession(interaction.guildId);
-    stopPlaybackForGuild(interaction.guildId);
-    connection.destroy();
-    await replyEphemeral(interaction, "Disconnected.");
   }
 });
 
 player.on(AudioPlayerStatus.Idle, () => {
-  console.log("Playback finished.");
-
   const currentPlayback = playbackState.current;
 
   if (!currentPlayback) {
     return;
   }
 
+  log.info({ guildId: currentPlayback.guildId }, "Playback finished");
   playbackState.current = null;
   if (currentPlayback.transcoder && !currentPlayback.transcoder.killed) {
     currentPlayback.transcoder.kill("SIGTERM");
@@ -955,7 +1016,7 @@ player.on(AudioPlayerStatus.Idle, () => {
 
   if (currentPlayback.mp3Path) {
     fs.unlink(currentPlayback.mp3Path, (err) => {
-      if (err) console.error(`Failed to delete TTS file ${currentPlayback.mp3Path}:`, err);
+      if (err) log.error({ err, mp3Path: currentPlayback.mp3Path }, "Failed to delete TTS file");
     });
   }
 
@@ -964,6 +1025,7 @@ player.on(AudioPlayerStatus.Idle, () => {
     if (connection) {
       cleanupListeningSession(currentPlayback.guildId);
       connection.destroy();
+      log.info({ guildId: currentPlayback.guildId }, "Disconnected after playback");
     }
   }
 
@@ -971,7 +1033,7 @@ player.on(AudioPlayerStatus.Idle, () => {
 });
 
 player.on("error", (error) => {
-  console.error("Audio player error:", error);
+  log.error({ err: error }, "Audio player error");
 
   const currentPlayback = playbackState.current;
 
@@ -986,7 +1048,7 @@ player.on("error", (error) => {
 
   if (currentPlayback.mp3Path) {
     fs.unlink(currentPlayback.mp3Path, (err) => {
-      if (err) console.error(`Failed to delete TTS file ${currentPlayback.mp3Path}:`, err);
+      if (err) log.error({ err, mp3Path: currentPlayback.mp3Path }, "Failed to delete TTS file");
     });
   }
 
