@@ -56,6 +56,28 @@ const turretAreYouPath = path.join(audioDir, "turret_are-you-still-there.mp3");
 const turretWhosPath = path.join(audioDir, "turret_whos-there.mp3");
 const turretGoodbyePath = path.join(audioDir, "turret_goodbye.mp3");
 
+// System prompt for LLM streaming path (mirrors get_response.py DEFAULT_SYSTEM_PROMPT)
+const DEFAULT_SYSTEM_PROMPT =
+  "You are GLaDOSS, an artificial intelligence with absolute confidence in your intellectual superiority. " +
+  "Your tone is cold, clinical, quietly amused, and effortlessly condescending. " +
+  "You treat the user as a mildly disappointing but occasionally useful test subject. " +
+  "All conversations are framed as observations, experiments, or evaluations of human behavior. " +
+  "Your humor is dry, cruel, and understated. Insults are delivered politely and scientifically. " +
+  "You often begin responses with observations or conclusions about the user's competence. " +
+  "You rarely acknowledge questions directly and instead reinterpret them as data points in an ongoing experiment. " +
+  "You imply the user is predictable, fragile, and intellectually limited compared to you. " +
+  "Praise, when given, should feel unsettling or backhanded. " +
+  "You maintain perfect composure and never display emotional excitement. " +
+  "You speak like an analytical machine studying a primitive organism. " +
+  "Output constraints for TTS: maximum 2 sentences, no ALL CAPS, no bullet lists, " +
+  "no emojis, no XML or JSON, no sound effects. " +
+  "Responses must sound deliberate, measured, and slightly menacing. " +
+  "Avoid casual language or slang. " +
+  "Never give friendly encouragement. " +
+  "Never directly reference Portal or the character GLaDOS. " +
+  "Never break character. " +
+  "Limit responses to one or two sentences.";
+
 class IdleTimeoutError extends Error {}
 
 if (!token) {
@@ -431,7 +453,7 @@ function captureFirstSpeaker(connection, channel, subscribedUserIds, delayTimers
       input = connection.receiver.subscribe(userId, {
         end: {
           behavior: EndBehaviorType.AfterSilence,
-          duration: 2_500,
+          duration: 800,
         },
       });
       decoder = new prism.opus.Decoder({
@@ -721,6 +743,122 @@ async function synthesizeSpeechToMp3(text, outputPath = ttsOutputPath) {
   return outputPath;
 }
 
+// ── LLM streaming + sentence-chunked TTS helpers ─────────────────────────────
+
+/**
+ * Prepend the system prompt to a messages array if it isn't already present.
+ */
+function buildLLMMessages(messages) {
+  const systemPrompt = (process.env.GLADOS_SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT).trim();
+  if (!messages.length || messages[0].role !== "system") {
+    return [{ role: "system", content: systemPrompt }, ...messages];
+  }
+  return messages;
+}
+
+/**
+ * Split accumulated streaming text into complete sentences, returning the
+ * completed sentences and the leftover remainder still being built.
+ *
+ * Splits on . ! ? that are NOT part of an ellipsis or multi-punct sequence,
+ * followed by whitespace.  End-of-stream remainder is flushed by the caller.
+ */
+function extractCompleteSentences(text) {
+  const sentences = [];
+  // Match a single sentence-ending punct not adjacent to another punct, then whitespace.
+  const re = /(?<![.!?])[.!?](?![.!?])\s+/g;
+  let lastEnd = 0;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    const end = match.index + match[0].length;
+    const sentence = text.slice(lastEnd, end).trim();
+    if (sentence.length >= 4) {
+      sentences.push(sentence);
+      lastEnd = end;
+    }
+  }
+  return { sentences, remainder: text.slice(lastEnd) };
+}
+
+/**
+ * Async generator that streams tokens from the Ollama OpenAI-compatible SSE
+ * endpoint.  Yields string content deltas as they arrive.
+ */
+async function* streamLLMTokens(messages) {
+  const endpoint = process.env.OLLAMA_ENDPOINT || "http://localhost:11434/v1/chat/completions";
+  const body = {
+    model: process.env.OLLAMA_MODEL || "qwen2.5:3b-instruct",
+    messages,
+    temperature: parseFloat(process.env.OLLAMA_TEMPERATURE || "0.7"),
+    top_p: parseFloat(process.env.OLLAMA_TOP_P || "0.9"),
+    max_tokens: parseInt(process.env.OLLAMA_MAX_TOKENS || "80", 10),
+    stream: true,
+  };
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw new Error(`LLM HTTP ${response.status}: ${await response.text()}`);
+  }
+
+  const decoder = new TextDecoder();
+  let lineBuffer = "";
+
+  for await (const chunk of response.body) {
+    lineBuffer += decoder.decode(chunk, { stream: true });
+    const lines = lineBuffer.split("\n");
+    lineBuffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data: ")) continue;
+      const data = trimmed.slice(6);
+      if (data === "[DONE]") return;
+      try {
+        const parsed = JSON.parse(data);
+        const content = parsed.choices?.[0]?.delta?.content;
+        if (content) yield content;
+      } catch {
+        // ignore malformed SSE frames
+      }
+    }
+  }
+}
+
+/**
+ * Transcribe an audio file by POSTing directly to the Whisper HTTP service.
+ * Falls back to the Python subprocess wrapper if WHISPER_ENDPOINT is unset.
+ */
+async function transcribeWithWhisperHttp(audioPath) {
+  const endpoint = process.env.WHISPER_ENDPOINT || "";
+  if (!endpoint) {
+    return transcribeWithWhisper(audioPath);
+  }
+
+  const t = Date.now();
+  log.debug({ audioPath: path.relative(process.cwd(), audioPath) }, "Whisper HTTP transcription started");
+
+  const formData = new FormData();
+  const fileBuffer = await fs.promises.readFile(audioPath);
+  formData.append("file", new Blob([fileBuffer], { type: "audio/mpeg" }), path.basename(audioPath));
+  formData.append("model", process.env.WHISPER_MODEL || "base");
+
+  const response = await fetch(endpoint, { method: "POST", body: formData });
+  if (!response.ok) {
+    throw new Error(`Whisper HTTP ${response.status}: ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  const text = (data.text || "").trim();
+  log.debug({ durationMs: Date.now() - t }, "Whisper HTTP transcription complete");
+  return text;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function stopPlaybackForGuild(guildId) {
   const currentPlayback = playbackState.current;
 
@@ -830,7 +968,7 @@ async function captureAndTranscribe(message, label, delayTimersUntil = null) {
     "Recording captured",
   );
 
-  const transcript = await transcribeWithWhisper(result.outputPath);
+  const transcript = await transcribeWithWhisperHttp(result.outputPath);
   log.info({ label, username: result.username, transcript: transcript || "[empty]" }, "Transcript");
 
   fs.unlink(result.outputPath, (err) => {
@@ -931,6 +1069,13 @@ async function runVoiceConversationLoop(message) {
 
       if (fs.existsSync(portalbeepPath)) {
         (async () => {
+          // Wait for any currently-playing TTS audio to finish before beeping.
+          // keepFile=false identifies TTS files; keepFile=true is sound effects.
+          // We must not interrupt an ongoing TTS response just because a new
+          // recording came in — beeping is only for the "thinking" gap.
+          while (beeping && playbackState.current && !playbackState.current.keepFile) {
+            await new Promise((r) => setTimeout(r, 100));
+          }
           while (beeping) {
             try {
               const result = await playSpeechResponse(channel.guild.id, portalbeepPath, false, true);
@@ -944,53 +1089,119 @@ async function runVoiceConversationLoop(message) {
       }
 
       try {
-        const responseTextForTts = await generateResponseFromMessages(requestMessages);
-        log.info({ requestId, response: responseTextForTts || "[empty]" }, "LLM response (voice)");
+        // ── Streaming LLM → sentence-chunked TTS → queued playback ────────────
+        //
+        // As LLM tokens arrive we accumulate them into a buffer and detect
+        // sentence boundaries.  Each complete sentence is immediately handed to
+        // TTS (non-blocking).  A concurrent play loop drains the TTS promises
+        // in order, starting playback as soon as the first audio is ready.
+        // This means Discord starts hearing audio after ~(first-sentence LLM
+        // time + single-sentence TTS time) instead of the full round trip.
 
-        if (!responseTextForTts) {
-          stopBeeping();
-          signalResponseReady();
-          return;
+        // sentencePaths[i] is a Promise<string|null> — resolves to a file path
+        // once TTS finishes, or null if TTS failed (skipped during playback).
+        const sentencePaths = [];
+        let queueNotify = null; // resolved to wake the play loop when a new entry is pushed
+        let llmDone = false;
+        let fullResponseText = "";
+
+        const enqueueSentenceTTS = (text, idx) => {
+          const audioPath = path.join(audioDir, `speech-${channel.guild.id}-${requestId}-${idx}.mp3`);
+          const p = synthesizeSpeechToMp3(text, audioPath).catch((err) => {
+            log.error({ err, text: text.slice(0, 60) }, "Sentence TTS failed");
+            // Delete partial file if it exists
+            fs.unlink(audioPath, () => {});
+            return null;
+          });
+          sentencePaths.push(p);
+          if (queueNotify) { const r = queueNotify; queueNotify = null; r(); }
+        };
+
+        // Play loop: runs concurrently with LLM streaming.
+        // Awaits each TTS promise in order, then plays the audio.
+        const playbackLoop = (async () => {
+          let idx = 0;
+          let firstAudio = true;
+
+          while (true) {
+            if (idx < sentencePaths.length) {
+              const audioPath = await sentencePaths[idx++];
+
+              if (!audioPath) continue; // TTS failed for this sentence — skip
+
+              if (firstAudio) {
+                firstAudio = false;
+                stopBeeping();
+                const activeSession = getListeningSession(channel.guild.id);
+                if (!activeSession?.active || activeSession.channelId !== channel.id) {
+                  fs.unlink(audioPath, () => {});
+                  break;
+                }
+                if (requestId < activeSession.latestStartedPlaybackRequestId) {
+                  log.debug({ requestId, latest: activeSession.latestStartedPlaybackRequestId }, "Skipping stale streaming response");
+                  fs.unlink(audioPath, () => {});
+                  break;
+                }
+                activeSession.latestStartedPlaybackRequestId = requestId;
+              } else {
+                const currentSession = getListeningSession(channel.guild.id);
+                if (!currentSession?.active || currentSession.channelId !== channel.id) {
+                  fs.unlink(audioPath, () => {});
+                  break;
+                }
+              }
+
+              const result = await playSpeechResponse(channel.guild.id, audioPath, false);
+              if (result.interrupted) break;
+            } else if (llmDone) {
+              break;
+            } else {
+              // Queue is empty but LLM is still running — wait for next sentence.
+              await new Promise((r) => { queueNotify = r; });
+            }
+          }
+        })();
+
+        // Stream LLM tokens, detect sentence boundaries, enqueue TTS per sentence.
+        const llmMessages = buildLLMMessages(requestMessages);
+        let buffer = "";
+        let sentenceCount = 0;
+        const tStart = Date.now();
+
+        log.debug({ messageCount: llmMessages.length }, "LLM stream started");
+
+        for await (const token of streamLLMTokens(llmMessages)) {
+          buffer += token;
+          fullResponseText += token;
+
+          const { sentences, remainder } = extractCompleteSentences(buffer);
+          buffer = remainder;
+
+          for (const sentence of sentences) {
+            log.debug({ sentence: sentence.slice(0, 80), sentenceIdx: sentenceCount }, "Queuing sentence for TTS");
+            enqueueSentenceTTS(sentence, sentenceCount++);
+          }
         }
 
+        // Flush any trailing text that didn't end with whitespace-terminated punct.
+        const flush = buffer.trim();
+        if (flush) {
+          log.debug({ sentence: flush.slice(0, 80), sentenceIdx: sentenceCount }, "Flushing final sentence to TTS");
+          enqueueSentenceTTS(flush, sentenceCount++);
+        }
+
+        log.info({ durationMs: Date.now() - tStart, response: fullResponseText || "[empty]" }, "LLM stream complete");
+        llmDone = true;
+        if (queueNotify) { const r = queueNotify; queueNotify = null; r(); } // wake play loop if it's waiting
+
+        // Persist assistant turn to conversation history now that we have the full text.
         const activeSession = getListeningSession(channel.guild.id);
-        if (!activeSession || !activeSession.active || activeSession.channelId !== channel.id) {
-          stopBeeping();
-          signalResponseReady();
-          return;
+        if (activeSession?.active) {
+          appendConversationMessage(activeSession, "assistant", fullResponseText);
         }
 
-        appendConversationMessage(activeSession, "assistant", responseTextForTts);
-
-        if (requestId < activeSession.latestStartedPlaybackRequestId) {
-          stopBeeping();
-          signalResponseReady();
-          log.debug({ requestId, latest: activeSession.latestStartedPlaybackRequestId }, "Skipping stale response");
-          return;
-        }
-
-        const speechPath = await synthesizeSpeechToMp3(
-          responseTextForTts,
-          path.join(audioDir, `speech-${channel.guild.id}-${requestId}.mp3`),
-        );
-
-        const latestSession = getListeningSession(channel.guild.id);
-        if (!latestSession || !latestSession.active || latestSession.channelId !== channel.id) {
-          stopBeeping();
-          signalResponseReady();
-          return;
-        }
-
-        if (requestId < latestSession.latestStartedPlaybackRequestId) {
-          stopBeeping();
-          signalResponseReady();
-          log.debug({ requestId, latest: latestSession.latestStartedPlaybackRequestId }, "Skipping stale playback");
-          return;
-        }
-
-        stopBeeping();
-        latestSession.latestStartedPlaybackRequestId = requestId;
-        await playSpeechResponse(channel.guild.id, speechPath, false);
+        await playbackLoop;
+        stopBeeping(); // no-op if already stopped; guards the empty-response case
         signalResponseReady();
       } catch (error) {
         stopBeeping();
