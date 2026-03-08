@@ -50,6 +50,13 @@ const venvPythonPath = path.resolve(process.cwd(), ".venv/bin/python");
 const ttsEndpoint = process.env.TTS_ENDPOINT || "http://glados_voice:5050/v1/audio/speech";
 const ttsVoice = process.env.TTS_VOICE || "glados";
 const maxConversationChars = Number(process.env.MAX_CONVERSATION_CHARS || 6000);
+const portalbeepPath = path.join(audioDir, "portalbeep.mp3");
+const turretHelloPath = path.join(audioDir, "turret_hello.mp3");
+const turretAreYouPath = path.join(audioDir, "turret_are-you-still-there.mp3");
+const turretWhosPath = path.join(audioDir, "turret_whos-there.mp3");
+const turretGoodbyePath = path.join(audioDir, "turret_goodbye.mp3");
+
+class IdleTimeoutError extends Error {}
 
 if (!token) {
   throw new Error("Missing DISCORD_TOKEN in .env");
@@ -364,29 +371,36 @@ function createMp3Resource(mp3Path) {
   };
 }
 
-function captureFirstSpeaker(connection, channel, subscribedUserIds) {
+function captureFirstSpeaker(connection, channel, subscribedUserIds, delayTimersUntil = null) {
   if (subscribedUserIds.size === 0) {
     throw new Error("I could not subscribe to anyone in this voice channel.");
   }
 
   return new Promise((resolve, reject) => {
     let finished = false;
-    let timeoutId;
+    let t10 = null;
+    let t20 = null;
+    let t30 = null;
     let input = null;
     let decoder = null;
     let ffmpeg = null;
 
     const cleanup = () => {
       connection.receiver.speaking.off("start", onSpeakingStart);
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
+      clearTimeout(t10);
+      clearTimeout(t20);
+      clearTimeout(t30);
       if (input) {
         input.destroy();
       }
       if (decoder) {
         decoder.destroy();
       }
+    };
+
+    const playIdle = (soundPath) => {
+      if (finished || !fs.existsSync(soundPath)) return;
+      playSpeechResponse(channel.guild.id, soundPath, false, true).catch(() => {});
     };
 
     const finish = (handler, value) => {
@@ -403,6 +417,13 @@ function captureFirstSpeaker(connection, channel, subscribedUserIds) {
       if (finished || !subscribedUserIds.has(userId)) {
         return;
       }
+
+      clearTimeout(t10);
+      clearTimeout(t20);
+      clearTimeout(t30);
+      t10 = null;
+      t20 = null;
+      t30 = null;
 
       const member = channel.members.get(userId);
       log.debug({ userId, username: member?.user?.tag || userId }, "Speaking detected");
@@ -479,15 +500,26 @@ function captureFirstSpeaker(connection, channel, subscribedUserIds) {
       input.pipe(decoder).pipe(ffmpeg.stdin);
     };
 
-    timeoutId = setTimeout(() => {
-      finish(reject, new Error("No one started speaking within 30 seconds."));
-    }, 30_000);
+    const startTimers = () => {
+      if (finished) return;
+      t10 = setTimeout(() => { playIdle(turretAreYouPath); }, 10_000);
+      t20 = setTimeout(() => { playIdle(turretWhosPath); }, 20_000);
+      t30 = setTimeout(() => {
+        finish(reject, new IdleTimeoutError("No voice detected for 30 seconds."));
+      }, 30_000);
+    };
+
+    if (delayTimersUntil) {
+      delayTimersUntil.then(startTimers, startTimers);
+    } else {
+      startTimers();
+    }
 
     connection.receiver.speaking.on("start", onSpeakingStart);
   });
 }
 
-async function recordFirstSpeaker(message) {
+async function recordFirstSpeaker(message, delayTimersUntil = null) {
   const channel = getInvokerVoiceChannel(message);
 
   if (!channel) {
@@ -503,7 +535,7 @@ async function recordFirstSpeaker(message) {
   const connection = await connectToMemberChannel(message);
   const subscribedUserIds = subscribeToChannelUsers(connection, channel);
 
-  return captureFirstSpeaker(connection, channel, subscribedUserIds);
+  return captureFirstSpeaker(connection, channel, subscribedUserIds, delayTimersUntil);
 }
 
 function getPythonExecutable() {
@@ -642,11 +674,11 @@ function generateResponseFromMessages(messages) {
   });
 }
 
-async function captureUntilTranscript(message, label, maxAttempts = 5) {
+async function captureUntilTranscript(message, label, maxAttempts = 5, delayTimersUntil = null) {
   let lastCapture = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const capture = await captureAndTranscribe(message, `${label} attempt ${attempt}`);
+    const capture = await captureAndTranscribe(message, `${label} attempt ${attempt}`, delayTimersUntil);
     lastCapture = capture;
 
     if (capture.transcript) {
@@ -702,7 +734,7 @@ function stopPlaybackForGuild(guildId) {
     currentPlayback.transcoder.kill("SIGTERM");
   }
 
-  if (currentPlayback.mp3Path) {
+  if (currentPlayback.mp3Path && !currentPlayback.keepFile) {
     fs.unlink(currentPlayback.mp3Path, (err) => {
       if (err) log.error({ err, mp3Path: currentPlayback.mp3Path }, "Failed to delete TTS file");
     });
@@ -712,7 +744,7 @@ function stopPlaybackForGuild(guildId) {
   player.stop(true);
 }
 
-function playSpeechResponse(guildId, mp3Path, disconnectOnFinish = false) {
+function playSpeechResponse(guildId, mp3Path, disconnectOnFinish = false, keepFile = false) {
   const connection = getVoiceConnection(guildId);
 
   if (!connection) {
@@ -726,6 +758,7 @@ function playSpeechResponse(guildId, mp3Path, disconnectOnFinish = false) {
     playbackState.current = {
       disconnectOnFinish,
       guildId,
+      keepFile,
       mp3Path,
       reject,
       resolve,
@@ -769,7 +802,7 @@ async function sayDirectText(interaction, text) {
   await playSpeechResponse(interaction.guild.id, speechPath, true);
 }
 
-async function captureAndTranscribe(message, label) {
+async function captureAndTranscribe(message, label, delayTimersUntil = null) {
   const channel = getInvokerVoiceChannel(message);
   let result;
 
@@ -787,9 +820,9 @@ async function captureAndTranscribe(message, label) {
       throw new Error("Voice connection is no longer active.");
     }
 
-    result = await captureFirstSpeaker(connection, channel, existingSession.subscribedUserIds);
+    result = await captureFirstSpeaker(connection, channel, existingSession.subscribedUserIds, delayTimersUntil);
   } else {
-    result = await recordFirstSpeaker(message);
+    result = await recordFirstSpeaker(message, delayTimersUntil);
   }
 
   log.debug(
@@ -822,12 +855,34 @@ function shouldDisconnectOnTranscript(transcript) {
   );
 }
 
+async function playAndDisconnect(guildId) {
+  if (fs.existsSync(turretGoodbyePath)) {
+    try {
+      await playSpeechResponse(guildId, turretGoodbyePath, false, true);
+    } catch {}
+  }
+
+  const connection = getVoiceConnection(guildId);
+  if (connection) {
+    connection.destroy();
+  }
+}
+
 async function runVoiceConversationLoop(message) {
   const channel = getInvokerVoiceChannel(message);
 
   if (!channel) {
     throw new Error("Join a voice channel before using this command.");
   }
+
+  if (fs.existsSync(turretHelloPath)) {
+    try {
+      await playSpeechResponse(channel.guild.id, turretHelloPath, false, true);
+    } catch {}
+  }
+
+  // On the very first listen, timers start immediately (no response to wait for).
+  let responseReadyPromise = Promise.resolve();
 
   while (true) {
     const session = getListeningSession(channel.guild.id);
@@ -839,20 +894,23 @@ async function runVoiceConversationLoop(message) {
     let capture;
 
     try {
-      capture = await captureUntilTranscript(message, "voice");
+      capture = await captureUntilTranscript(message, "voice", 5, responseReadyPromise);
     } catch (error) {
+      if (error instanceof IdleTimeoutError) {
+        log.info({ guildId: channel.guild.id }, "Idle timeout, disconnecting");
+        cleanupListeningSession(channel.guild.id);
+        await playAndDisconnect(channel.guild.id);
+        return;
+      }
+
       log.error({ err: error }, "Listen cycle failed");
       continue;
     }
 
     if (shouldDisconnectOnTranscript(capture.transcript)) {
       log.info({ transcript: capture.transcript }, "Shutdown phrase detected, disconnecting");
-      const connection = getVoiceConnection(channel.guild.id);
       cleanupListeningSession(channel.guild.id);
-      if (connection) {
-        stopPlaybackForGuild(channel.guild.id);
-        connection.destroy();
-      }
+      await playAndDisconnect(channel.guild.id);
       return;
     }
 
@@ -862,23 +920,51 @@ async function runVoiceConversationLoop(message) {
     appendConversationMessage(session, "user", capture.transcript);
     const requestMessages = session.conversationHistory.map((entry) => ({ ...entry }));
 
+    // Create a promise that resolves when this response finishes playing (or is skipped/errored).
+    // The next captureUntilTranscript call waits on it before starting idle timers.
+    let signalResponseReady;
+    responseReadyPromise = new Promise((resolve) => { signalResponseReady = resolve; });
+
     void (async () => {
+      let beeping = true;
+      const stopBeeping = () => { beeping = false; };
+
+      if (fs.existsSync(portalbeepPath)) {
+        (async () => {
+          while (beeping) {
+            try {
+              const result = await playSpeechResponse(channel.guild.id, portalbeepPath, false, true);
+              if (!beeping || result.interrupted) break;
+              await new Promise((r) => setTimeout(r, 1000));
+            } catch {
+              break;
+            }
+          }
+        })();
+      }
+
       try {
         const responseTextForTts = await generateResponseFromMessages(requestMessages);
         log.info({ requestId, response: responseTextForTts || "[empty]" }, "LLM response (voice)");
 
         if (!responseTextForTts) {
+          stopBeeping();
+          signalResponseReady();
           return;
         }
 
         const activeSession = getListeningSession(channel.guild.id);
         if (!activeSession || !activeSession.active || activeSession.channelId !== channel.id) {
+          stopBeeping();
+          signalResponseReady();
           return;
         }
 
         appendConversationMessage(activeSession, "assistant", responseTextForTts);
 
         if (requestId < activeSession.latestStartedPlaybackRequestId) {
+          stopBeeping();
+          signalResponseReady();
           log.debug({ requestId, latest: activeSession.latestStartedPlaybackRequestId }, "Skipping stale response");
           return;
         }
@@ -890,17 +976,25 @@ async function runVoiceConversationLoop(message) {
 
         const latestSession = getListeningSession(channel.guild.id);
         if (!latestSession || !latestSession.active || latestSession.channelId !== channel.id) {
+          stopBeeping();
+          signalResponseReady();
           return;
         }
 
         if (requestId < latestSession.latestStartedPlaybackRequestId) {
+          stopBeeping();
+          signalResponseReady();
           log.debug({ requestId, latest: latestSession.latestStartedPlaybackRequestId }, "Skipping stale playback");
           return;
         }
 
+        stopBeeping();
         latestSession.latestStartedPlaybackRequestId = requestId;
         await playSpeechResponse(channel.guild.id, speechPath, false);
+        signalResponseReady();
       } catch (error) {
+        stopBeeping();
+        signalResponseReady();
         log.error({ err: error, requestId }, "Response cycle failed");
       }
     })();
@@ -975,8 +1069,7 @@ client.on("interactionCreate", async (interaction) => {
           return;
         }
         cleanupListeningSession(interaction.guildId);
-        stopPlaybackForGuild(interaction.guildId);
-        connection.destroy();
+        await playAndDisconnect(interaction.guildId);
         log.info({ guild }, "Disconnected by user request");
         await replyEphemeral(interaction, "Disconnected.");
         return;
@@ -1014,7 +1107,7 @@ player.on(AudioPlayerStatus.Idle, () => {
     currentPlayback.transcoder.kill("SIGTERM");
   }
 
-  if (currentPlayback.mp3Path) {
+  if (currentPlayback.mp3Path && !currentPlayback.keepFile) {
     fs.unlink(currentPlayback.mp3Path, (err) => {
       if (err) log.error({ err, mp3Path: currentPlayback.mp3Path }, "Failed to delete TTS file");
     });
