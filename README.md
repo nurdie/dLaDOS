@@ -47,7 +47,7 @@ No cloud APIs. No subscriptions. No cake.
         │  Opus @ 48 kHz
         ▼
 ┌─────────────────────────────────────┐
-│  🟠  bot  (bot.js)                  │  Node.js · discord.js v14
+│  🟠  bot  (src/bot.js + modules)    │  Node.js · discord.js v14
 │       Captures audio, drives the    │  @discordjs/voice + DAVE E2EE
 │       conversation loop             │
 └─────────────┬───────────────────────┘
@@ -140,7 +140,8 @@ See [Configuration](#%EF%B8%8F-configuration) for all options.
 
 | Command | Description |
 |:---:|:---|
-| 🟠 `/glados join` | Join your voice channel and start a conversation |
+| 🟠 `/glados join` | Join your voice channel and start a full conversation |
+| 👂 `/glados join_wake` | Join and listen silently until you say **"GLaDOS"**, then respond |
 | 🤖 `/glados ask <prompt>` | Send a typed prompt through the LLM and speak the response |
 | 🔵 `/glados say <text>` | Speak text directly via TTS — no LLM, instant playback |
 | 🚪 `/glados leave` | Disconnect the bot |
@@ -148,6 +149,8 @@ See [Configuration](#%EF%B8%8F-configuration) for all options.
 </div>
 
 Say **"go away GLaDOS"** or **"please leave"** in voice to end the session naturally.
+
+> **Wake word mode** (`join_wake`): GLaDOS stays silent and ignores all speech until she hears her name. Every utterance is still transcribed — but only those containing *"GLaDOS"*, *"GLaDOSS"*, or *"glad OS"* trigger a response. No idle timeout applies; she waits indefinitely.
 
 ---
 
